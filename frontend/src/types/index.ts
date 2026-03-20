@@ -88,9 +88,51 @@ export interface CreateSignalRequest {
   side: 'BUY' | 'SELL';
   quantity: number;
   price: number;
+  plan_id?: number;
   stop_loss?: number;
   take_profit?: number;
   max_slippage?: number;
+}
+
+// ===== Trader & Plan Types =====
+export interface Trader {
+  id: number;
+  name: string;
+  email: string;
+  avatar_url?: string;
+  is_active: boolean;
+  max_trades_per_day: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PlanWithTrader extends Plan {
+  trader_id?: number;
+  trader?: Trader;
+  virtual_balance: number;
+  subscription_price: number;
+  min_investment: number;
+  description?: string;
+  is_active: boolean;
+}
+
+export interface VirtualPortfolio {
+  symbol: string;
+  quantity: number;
+  avg_buy_price: number;
+  current_value: number;
+  profit_loss: number;
+  profit_loss_pct: number;
+}
+
+export interface UserSubscription {
+  id: number;
+  user_id: number;
+  plan_id: number;
+  subscribed_at: string;
+  expires_at?: string;
+  is_active: boolean;
+  monthly_fee_paid: number;
 }
 
 // ===== Metrics Types =====

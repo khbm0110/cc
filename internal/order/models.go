@@ -40,6 +40,8 @@ type Order struct {
 	BinanceOrderID *int64      `db:"binance_order_id" json:"binance_order_id,omitempty"`
 	ErrorMessage   *string     `db:"error_message" json:"error_message,omitempty"`
 	RetryCount     int         `db:"retry_count" json:"retry_count"`
+	SignalID       *int64      `db:"signal_id" json:"signal_id,omitempty"`
+	SourcePlanID   *int64      `db:"source_plan_id" json:"source_plan_id,omitempty"`
 	CreatedAt      time.Time   `db:"created_at" json:"created_at"`
 	UpdatedAt      time.Time   `db:"updated_at" json:"updated_at"`
 }
@@ -47,6 +49,18 @@ type Order struct {
 // CreateOrderParams holds parameters for creating a new order.
 type CreateOrderParams struct {
 	UserID        int64   `json:"user_id"`
+	ClientOrderID string  `json:"client_order_id"`
+	Symbol        string  `json:"symbol"`
+	Side          string  `json:"side"`
+	Quantity      float64 `json:"quantity"`
+	Price         float64 `json:"price"`
+}
+
+// CreateOrderFromSignalParams holds parameters for creating an order from a signal.
+type CreateOrderFromSignalParams struct {
+	UserID        int64   `json:"user_id"`
+	SignalID      int64   `json:"signal_id"`
+	SourcePlanID  int64   `json:"source_plan_id"`
 	ClientOrderID string  `json:"client_order_id"`
 	Symbol        string  `json:"symbol"`
 	Side          string  `json:"side"`
