@@ -19,7 +19,7 @@ graph TD
     end
 
     subgraph "Data Stores"
-        E[PostgreSQL]
+        E[PostgreSQL Database]
         F[Redis Streams]
     end
 
@@ -29,18 +29,18 @@ graph TD
         I[Prometheus]
     end
 
-    A -- "REST API (HTTPS)" --> B
-    B -- "Publish Signal" --> F
-    C -- "Consume Signal" --> F
-    C -- "Execute Trade" --> G
-    D -- "Reconcile Orders" --> G
-    B -- "User/Order Data" --> E
-    C -- "Order Data" --> E
-    D -- "Order Data" --> E
-    B -- "Create Invoice" --> H
-    H -- "Webhook" --> B
-    C -- "Report Metrics" --> I
-    D -- "Report Metrics" --> I
+    A -- "User requests via HTTPS" --> B;
+    B -- "Publishes trade signal to stream" --> F;
+    C -- "Consumes trade signal from stream" --> F;
+    C -- "Executes trades via API" --> G;
+    D -- "Reconciles order status via API" --> G;
+    B -- "Reads/writes user and order data" --> E;
+    C -- "Writes order data" --> E;
+    D -- "Updates order status" --> E;
+    B -- "Creates payment invoice via API" --> H;
+    H -- "Sends payment status via Webhook" --> B;
+    C -- "Reports execution metrics" --> I;
+    D -- "Reports reconciliation metrics" --> I;
 ```
 
 ## 3. Complete File Structure
@@ -202,7 +202,6 @@ graph TD
 ## 5. Database Schema
 
 ```sql
--- Existing tables
 CREATE TABLE plans (
     id SERIAL PRIMARY KEY,
     name VARCHAR(255) NOT NULL,
@@ -218,6 +217,37 @@ CREATE TABLE users (
     secret_key_encrypted TEXT
 );
 
+CREATE TABLE auth (
+    user_id INT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    email VARCHAR(255) UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,
+    jwt_refresh_token TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE payments (
+    id SERIAL PRIMARY KEY,
+    user_id INT REFERENCES users(id),
+    amount_usdt DECIMAL(16, 8) NOT NULL,
+    nowpayments_id VARCHAR(255) UNIQUE,
+    status VARCHAR(50) NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX idx_payments_user_id ON payments(user_id);
+CREATE INDEX idx_payments_status ON payments(status);
+CREATE INDEX idx_payments_created_at ON payments(created_at);
+
+CREATE TABLE subscriptions (
+    id SERIAL PRIMARY KEY,
+    user_id INT UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+    plan_id INT REFERENCES plans(id),
+    payment_id INT REFERENCES payments(id),
+    status VARCHAR(50) NOT NULL, -- e.g., active, expired, cancelled
+    start_date TIMESTAMP WITH TIME ZONE,
+    end_date TIMESTAMP WITH TIME ZONE
+);
+
 CREATE TABLE orders (
     id SERIAL PRIMARY KEY,
     user_id INT REFERENCES users(id),
@@ -229,35 +259,9 @@ CREATE TABLE orders (
     status VARCHAR(50) NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
-
--- Missing tables
-CREATE TABLE auth (
-    user_id INT PRIMARY KEY REFERENCES users(id),
-    email VARCHAR(255) UNIQUE NOT NULL,
-    password_hash TEXT NOT NULL,
-    jwt_refresh_token TEXT,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE subscriptions (
-    id SERIAL PRIMARY KEY,
-    user_id INT UNIQUE REFERENCES users(id),
-    plan_id INT REFERENCES plans(id),
-    status VARCHAR(50) NOT NULL, -- e.g., active, expired, cancelled
-    start_date TIMESTAMP WITH TIME ZONE,
-    end_date TIMESTAMP WITH TIME ZONE,
-    payment_id INT
-);
-
-CREATE TABLE payments (
-    id SERIAL PRIMARY KEY,
-    user_id INT REFERENCES users(id),
-    amount_usdt DECIMAL(16, 8) NOT NULL,
-    nowpayments_id VARCHAR(255) UNIQUE,
-    status VARCHAR(50) NOT NULL, -- e.g., pending, completed, failed
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
+CREATE INDEX idx_orders_user_id ON orders(user_id);
+CREATE INDEX idx_orders_status ON orders(status);
+CREATE INDEX idx_orders_created_at ON orders(created_at);
 
 CREATE TABLE dead_letter_queue (
     id SERIAL PRIMARY KEY,
@@ -266,8 +270,6 @@ CREATE TABLE dead_letter_queue (
     error TEXT,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
-
-ALTER TABLE subscriptions ADD CONSTRAINT fk_payment_id FOREIGN KEY (payment_id) REFERENCES payments(id);
 ```
 
 ## 6. Environment Variables
@@ -295,12 +297,126 @@ NEXT_PUBLIC_API_URL="http://localhost:8080"
 
 ## 7. Critical Bug Fixes
 
-1.  **MockBalanceChecker**: In `internal/validator/validator.go`, replace `MockBalanceChecker` with a real implementation that calls the `GetBalance` method on the Binance client.
-2.  **Slippage Validation**: In `internal/validator/validator.go`, fetch the live price from Binance for the given symbol and compare it against `signal.Price`.
-3.  **Silent Order Loss**: In `internal/worker/worker.go`, wrap order execution in a `try/catch`-like block. On error, if retries are exhausted, publish the failed signal to the `dead_letter_queue` in Redis.
-4.  **MARKET Order Support**: Modify `internal/order/models.go` to include `MARKET` as an order type. Update the worker to handle signals with this type, omitting the price from the Binance API call.
-5.  **GetBalance Endpoint**: Add `GetBalance(ctx context.Context, symbol string) (float64, error)` to the `BinanceClient` interface in `internal/binance/client.go` and implement it.
-6.  **Binance Client Caching**: Implement a caching mechanism (e.g., a `map[userID]*binance.Client`) in the worker to store and reuse Binance clients per user, avoiding re-instantiation on every request.
+### 1. MockBalanceChecker
+In `internal/validator/validator.go`, the `BalanceChecker` is a mock. It needs to be replaced with a real implementation that calls the Binance client.
+
+**Current Code:**
+```go
+// internal/validator/validator.go
+
+type MockBalanceChecker struct{}
+
+func (m *MockBalanceChecker) CheckBalance(ctx context.Context, userID int, required float64, symbol string) (bool, error) {
+    // MOCK: Always returns true
+    return true, nil
+}
+```
+
+**Fixed Code:**
+```go
+// internal/validator/validator.go
+
+type LiveBalanceChecker struct {
+    BinanceClient binance.Client
+}
+
+func (l *LiveBalanceChecker) CheckBalance(ctx context.Context, apiKey, apiSecret string, required float64, symbol string) (bool, error) {
+    balance, err := l.BinanceClient.GetBalance(ctx, apiKey, apiSecret, symbol)
+    if err != nil {
+        return false, fmt.Errorf("failed to get balance: %w", err)
+    }
+    return balance >= required, nil
+}
+```
+
+### 2. Slippage Validation
+In `internal/validator/validator.go`, the validator does not check for slippage. It must fetch the live price from Binance and compare it against the signal's price.
+
+**Current Code:**
+```go
+// internal/validator/validator.go
+
+func (v *Validator) ValidateSignal(ctx context.Context, signal *models.Signal) error {
+    // ... other validations
+    if signal.Price <= 0 {
+        return errors.New("price must be positive")
+    }
+    // No slippage check
+    return nil
+}
+```
+
+**Fixed Code:**
+```go
+// internal/validator/validator.go
+
+const maxSlippage = 0.01 // 1%
+
+func (v *Validator) ValidateSignal(ctx context.Context, signal *models.Signal, binanceClient binance.Client) error {
+    // ... other validations
+    livePrice, err := binanceClient.GetTickerPrice(ctx, signal.Symbol)
+    if err != nil {
+        return fmt.Errorf("could not fetch live price: %w", err)
+    }
+
+    priceDiff := math.Abs(signal.Price - livePrice)
+    slippage := priceDiff / livePrice
+
+    if slippage > maxSlippage {
+        return fmt.Errorf("slippage of %.2f%% exceeds max of %.2f%%", slippage*100, maxSlippage*100)
+    }
+
+    return nil
+}
+```
+
+### 3. Silent Order Loss
+In `internal/worker/worker.go`, an order execution failure is not handled, leading to silent loss. Failed orders must be retried and eventually sent to a dead-letter queue.
+
+**Current Code:**
+```go
+// internal/worker/worker.go
+
+func (w *Worker) processSignal(ctx context.Context, signal *models.Signal, user *models.User) {
+    // ...
+    order, err := w.binanceClient.CreateOrder(ctx, user.ApiKey, user.ApiSecret, signal)
+    if err != nil {
+        // ERROR IS IGNORED
+        log.Printf("Error creating order for user %d: %v", user.ID, err)
+    }
+    // ...
+}
+```
+
+**Fixed Code:**
+```go
+// internal/worker/worker.go
+
+func (w *Worker) processSignal(ctx context.Context, signal *models.Signal, user *models.User) {
+    // ...
+    var order *models.Order
+    var err error
+
+    // Retry logic
+    for i := 0; i < maxRetries; i++ {
+        order, err = w.binanceClient.CreateOrder(ctx, user.ApiKey, user.ApiSecret, signal)
+        if err == nil {
+            break // Success
+        }
+        log.Printf("Attempt %d: Error creating order for user %d: %v", i+1, user.ID, err)
+        time.Sleep(retryDelay)
+    }
+
+    if err != nil {
+        log.Printf("Final attempt failed for user %d. Publishing to dead letter queue.", user.ID)
+        if dlqErr := w.dlq.Publish(ctx, signal, user.ID, err); dlqErr != nil {
+            log.Printf("CRITICAL: Failed to publish to dead letter queue: %v", dlqErr)
+        }
+        return
+    }
+    // ... process successful order
+}
+```
 
 ## 8. Build Order
 
@@ -321,9 +437,40 @@ The Vercel-hosted Next.js frontend will communicate with the Railway-hosted Go b
 
 ## 10. NOWPayments Flow
 
-1.  **User Initiates Subscription**: User selects a plan and clicks "Subscribe".
-2.  **Invoice Creation**: Frontend sends a request to `POST /api/v1/subscriptions/subscribe`. The backend creates an invoice with NOWPayments, stores the `payment_id` in the `payments` table with `status: 'pending'`, and returns the payment URL to the frontend.
-3.  **User Pays**: User is redirected to the NOWPayments URL to complete the payment in USDT.
-4.  **Webhook Notification**: NOWPayments sends a webhook to `POST /api/v1/payments/nowpayments/webhook` with the payment status.
-5.  **Webhook Verification**: The backend verifies the webhook signature using the `NOWPAYMENTS_IPN_SECRET`.
-6.  **Subscription Activation**: If the payment is successful, the backend updates the `payments` table to `status: 'completed'` and the `subscriptions` table to `status: 'active'`, setting the `start_date` and `end_date`.
+This section details the complete subscription payment flow using NOWPayments, including error handling.
+
+1.  **User Initiates Subscription**: The user selects a subscription plan on the frontend and clicks "Subscribe". The frontend sends a request to the backend: `POST /api/v1/subscriptions/subscribe` with the plan ID.
+
+2.  **Invoice Creation**:
+    *   The backend receives the request, validates the user's JWT, and finds the corresponding plan.
+    *   It creates a record in the `payments` table with `status: 'pending'`, `user_id`, and the `amount_usdt` from the plan.
+    *   It then calls the NOWPayments API to create an invoice, passing the payment amount and a unique `order_id` (e.g., the internal payment ID).
+    *   NOWPayments returns a payment URL. The backend updates the `payments` record with the `nowpayments_id` from the response.
+    *   The backend returns the `payment_url` to the frontend.
+
+3.  **User Payment**:
+    *   The frontend redirects the user to the `payment_url`.
+    *   The user completes the payment using a supported cryptocurrency (e.g., USDT).
+
+4.  **Webhook Notification**:
+    *   After the payment state changes (e.g., `waiting`, `confirming`, `finished`, `failed`, `expired`), NOWPayments sends an HTTP POST request (webhook) to our backend endpoint: `POST /api/v1/payments/nowpayments/webhook`.
+    *   The request body contains the payment details, and the headers contain a signature (`x-nowpayments-sig`).
+
+5.  **Webhook Verification & Processing**:
+    *   Our backend receives the webhook. It first verifies the signature by computing an HMAC-SHA512 hash of the request body using the `NOWPAYMENTS_IPN_SECRET` and comparing it to the `x-nowpayments-sig` header.
+    *   **If signature is invalid**: The webhook is discarded, and an error is logged. An HTTP 400 Bad Request is returned.
+    *   **If signature is valid**: The backend parses the payment status.
+        *   `finished`: The payment was successful. The backend finds the corresponding `payments` record, updates its status to `'completed'`, and activates the user's subscription in the `subscriptions` table (sets `status: 'active'`, `start_date`, and `end_date`).
+        *   `failed` or `expired`: The payment was not completed. The backend updates the `payments` record status to `'failed'` or `'expired'`. The subscription is not activated.
+        *   Other statuses (`waiting`, `confirming`): These are intermediate states. The backend can log them but typically takes no action, waiting for a final status.
+
+### Error Handling Scenarios:
+
+*   **Webhook Endpoint Fails**: If our endpoint returns a non-200 status code or is down, NOWPayments will automatically retry sending the webhook periodically for up to 24 hours. This ensures we eventually receive the payment status.
+
+*   **Payment Expires**: If the user doesn't pay within the allotted time (e.g., 20 minutes), NOWPayments sends a webhook with the `expired` status. Our system will update the corresponding `payments` record to `'expired'`, and the user will have to start the subscription process over.
+
+*   **Duplicate Payments / Double Webhook**:
+    *   Our system uses the unique `nowpayments_id` to identify payments. The `payments` table has a `UNIQUE` constraint on this column.
+    *   If a webhook for a `finished` payment is received twice, the first one will update the subscription to `'active'`. The second webhook will be processed, but since the subscription is already active, no further state change will occur. The system should be idempotent: processing the same successful webhook multiple times should not result in multiple new subscriptions or extensions.
+    *   If a user somehow initiates and pays for a second subscription while the first is still active, this will create a new payment record. When the webhook for the second payment arrives, our business logic must decide how to handle it. A safe approach is to flag it for manual review. A more automated approach could be to extend the user's current subscription `end_date`.
