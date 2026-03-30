@@ -80,10 +80,11 @@ func run(logger *slog.Logger) error {
 
 	// Repositories
 	orderRepo := order.NewPostgresRepository(db)
+	dlqRepo := order.NewPostgresDLQRepository(db)
 	userRepo := user.NewPostgresRepository(db)
 
 	// Validator
-	balanceChecker := validator.NewMockBalanceChecker()
+	balanceChecker := &validator.LiveBalanceChecker{}
 	v := validator.New(validator.Config{
 		DefaultMaxSlippage: 0.02,
 	}, balanceChecker)
@@ -100,6 +101,7 @@ func run(logger *slog.Logger) error {
 	// Worker
 	w := worker.NewWorker(
 		orderRepo,
+		dlqRepo,
 		userRepo,
 		keyManager,
 		eb,

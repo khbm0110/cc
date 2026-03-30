@@ -76,6 +76,8 @@ func (e *APIError) IsRetriable() bool {
 type Client interface {
 	ExecuteOrder(ctx context.Context, req OrderRequest) (*OrderResponse, error)
 	QueryOrderStatus(ctx context.Context, symbol string, clientOrderID string) (*QueryOrderResponse, error)
+	GetTickerPrice(ctx context.Context, symbol string) (float64, error)
+	GetBalance(ctx context.Context, symbol string) (float64, error)
 }
 
 // RealClient implements Client with actual Binance API calls.
@@ -256,6 +258,112 @@ func (c *RealClient) QueryOrderStatus(ctx context.Context, symbol string, client
 	)
 
 	return &queryResp, nil
+}
+
+func (c *RealClient) GetTickerPrice(ctx context.Context, symbol string) (float64, error) {
+	start := time.Now()
+	defer func() {
+		metrics.BinanceAPIDuration.WithLabelValues("get_ticker_price").Observe(time.Since(start).Seconds())
+	}()
+
+	params := url.Values{}
+	params.Set("symbol", symbol)
+	reqURL := fmt.Sprintf("%s/api/v3/ticker/price?%s", c.baseURL, params.Encode())
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return 0, fmt.Errorf("create request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		metrics.BinanceAPIErrors.WithLabelValues("network").Inc()
+		return 0, fmt.Errorf("http request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, fmt.Errorf("read response body: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("unexpected status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var priceResp struct {
+		Symbol string `json:"symbol"`
+		Price  string `json:"price"`
+	}
+	if err := json.Unmarshal(body, &priceResp); err != nil {
+		return 0, fmt.Errorf("unmarshal response: %w", err)
+	}
+
+	price, err := strconv.ParseFloat(priceResp.Price, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse price: %w", err)
+	}
+
+	return price, nil
+}
+
+func (c *RealClient) GetBalance(ctx context.Context, symbol string) (float64, error) {
+	start := time.Now()
+	defer func() {
+		metrics.BinanceAPIDuration.WithLabelValues("get_balance").Observe(time.Since(start).Seconds())
+	}()
+
+	params := url.Values{}
+	params.Set("timestamp", strconv.FormatInt(time.Now().UnixMilli(), 10))
+	params.Set("recvWindow", "5000")
+	signature := c.sign(params.Encode())
+	params.Set("signature", signature)
+
+	reqURL := fmt.Sprintf("%s/api/v3/account?%s", c.baseURL, params.Encode())
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return 0, fmt.Errorf("create request: %w", err)
+	}
+	httpReq.Header.Set("X-MBX-APIKEY", c.apiKey)
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		metrics.BinanceAPIErrors.WithLabelValues("network").Inc()
+		return 0, fmt.Errorf("http request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, fmt.Errorf("read response body: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("unexpected status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var accountResp struct {
+		Balances []struct {
+			Asset string `json:"asset"`
+			Free  string `json:"free"`
+		} `json:"balances"`
+	}
+	if err := json.Unmarshal(body, &accountResp); err != nil {
+		return 0, fmt.Errorf("unmarshal response: %w", err)
+	}
+
+	for _, b := range accountResp.Balances {
+		if b.Asset == symbol {
+			free, err := strconv.ParseFloat(b.Free, 64)
+			if err != nil {
+				return 0, fmt.Errorf("parse free balance: %w", err)
+			}
+			return free, nil
+		}
+	}
+
+	return 0, nil
 }
 
 // sign creates an HMAC-SHA256 signature for Binance API authentication.
