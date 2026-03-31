@@ -25,10 +25,17 @@ type RefreshRequest struct {
 	RefreshToken string `json:"refresh_token"`
 }
 
+type UserResponse struct {
+	ID    int64  `json:"id"`
+	Email string `json:"email"`
+	Name  string `json:"name"`
+	Role  string `json:"role"`
+}
+
 type AuthResponse struct {
-	Token        string    `json:"token"`
-	RefreshToken string    `json:"refresh_token,omitempty"`
-	User         user.User `json:"user"`
+	Token        string       `json:"token"`
+	RefreshToken string       `json:"refresh_token,omitempty"`
+	User         UserResponse `json:"user"`
 }
 
 type AuthHandler struct {
@@ -85,7 +92,15 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(AuthResponse{Token: token, User: *u})
+	json.NewEncoder(w).Encode(AuthResponse{
+		Token: token,
+		User: UserResponse{
+			ID:    u.ID,
+			Email: u.Email,
+			Name:  u.Name,
+			Role:  u.Role,
+		},
+	})
 }
 
 func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
@@ -130,7 +145,12 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(AuthResponse{
 		Token:        token,
 		RefreshToken: refreshToken,
-		User:         *u,
+		User: UserResponse{
+			ID:    u.ID,
+			Email: u.Email,
+			Name:  u.Name,
+			Role:  u.Role,
+		},
 	})
 }
 
@@ -155,5 +175,13 @@ func (h *AuthHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(AuthResponse{Token: token, User: *u})
+	json.NewEncoder(w).Encode(AuthResponse{
+		Token: token,
+		User: UserResponse{
+			ID:    u.ID,
+			Email: u.Email,
+			Name:  u.Name,
+			Role:  u.Role,
+		},
+	})
 }

@@ -140,7 +140,7 @@ func (r *Reconciler) reconcileOrder(ctx context.Context, ord order.Order) error 
 
 func (r *Reconciler) reconcileExecutingOrder(ctx context.Context, ord order.Order, logger *slog.Logger) error {
 	// Get user credentials
-	u, err := r.userRepo.GetUserByID(ctx, ord.UserID)
+	u, err := r.userRepo.GetByID(ctx, ord.UserID)
 	if err != nil {
 		if errors.Is(err, user.ErrUserNotFound) {
 			logger.Warn("user not found, marking order as FAILED")

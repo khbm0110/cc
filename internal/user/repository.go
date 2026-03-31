@@ -23,7 +23,7 @@ type CreateUserParams struct {
 
 // Repository defines the interface for user and plan persistence.
 type Repository interface {
-	GetUserByID(ctx context.Context, id int64) (*User, error)
+	GetByID(ctx context.Context, id int64) (*User, error)
 	GetUserWithPlan(ctx context.Context, userID int64) (*UserWithPlan, error)
 	GetPlanByID(ctx context.Context, id int64) (*Plan, error)
 	ListActiveUsers(ctx context.Context) ([]User, error)
@@ -31,6 +31,7 @@ type Repository interface {
 	GetByEmail(ctx context.Context, email string) (*User, error)
 	GetByRefreshToken(ctx context.Context, token string) (*User, error)
 	UpdateRefreshToken(ctx context.Context, userID int64, token string, expiry time.Time) error
+	UpdateAPIKeys(ctx context.Context, userID int64, apiKey, secretKey string) error
 }
 
 // PostgresRepository implements Repository using PostgreSQL.
@@ -43,7 +44,7 @@ func NewPostgresRepository(db *sql.DB) *PostgresRepository {
 	return &PostgresRepository{db: db}
 }
 
-func (r *PostgresRepository) GetUserByID(ctx context.Context, id int64) (*User, error) {
+func (r *PostgresRepository) GetByID(ctx context.Context, id int64) (*User, error) {
 	query := `
 		SELECT id, email, password_hash, name, role, plan_id, api_key_encrypted, secret_key_encrypted, refresh_token, refresh_token_expiry, created_at, updated_at
 		FROM users WHERE id = $1`
@@ -194,6 +195,15 @@ func (r *PostgresRepository) UpdateRefreshToken(ctx context.Context, userID int6
 	_, err := r.db.ExecContext(ctx, query, token, expiry, userID)
 	if err != nil {
 		return fmt.Errorf("update refresh token: %w", err)
+	}
+	return nil
+}
+
+func (r *PostgresRepository) UpdateAPIKeys(ctx context.Context, userID int64, apiKey, secretKey string) error {
+	query := `UPDATE users SET api_key_encrypted = $1, secret_key_encrypted = $2, updated_at = NOW() WHERE id = $3`
+	_, err := r.db.ExecContext(ctx, query, apiKey, secretKey, userID)
+	if err != nil {
+		return fmt.Errorf("update api keys: %w", err)
 	}
 	return nil
 }
